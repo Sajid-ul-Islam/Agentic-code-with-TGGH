@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import google.generativeai as genai
+from openai import AsyncOpenAI
 from github_helper import GitHubHelper
 
 # Load environment variables from .env file
@@ -140,6 +141,26 @@ GITHUB_TOOLS = [
         }
     }
 ]
+
+def convert_to_openai_tools(gemini_tools):
+    import copy
+    openai_tools = []
+    for tool in gemini_tools:
+        t = copy.deepcopy(tool)
+        t["parameters"]["type"] = "object"
+        for prop, details in t["parameters"].get("properties", {}).items():
+            details["type"] = details["type"].lower()
+            if details["type"] == "integer":
+                details["type"] = "integer"
+            elif details["type"] == "string":
+                details["type"] = "string"
+        openai_tools.append({
+            "type": "function",
+            "function": t
+        })
+    return openai_tools
+
+OPENAI_TOOLS = convert_to_openai_tools(GITHUB_TOOLS)
 
 
 def execute_github_tool(tool_name: str, tool_input: dict, github_token: str) -> str:
@@ -330,6 +351,107 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
     return final_response.strip() if final_response.strip() else "Task completed, but no summary was returned."
 
 
+async def agentic_workflow_openai(user_message: str, github_token: str, user_id: int, client: AsyncOpenAI, model_name: str) -> str:
+    """
+    Run Agentic workflow using OpenAI-compatible API (Groq/OpenRouter)
+    """
+    system_prompt = (
+        "You are an AI assistant that helps users interact with their GitHub repositories. "
+        "When the user mentions a task (review code, list files, fix a bug, etc.), "
+        "use the available tools to read files, make edits, or create branches as needed. "
+        "If an [Active Repository: owner/repo] tag appears at the start of the message, "
+        "always use that as the repository for all tool calls unless the user explicitly specifies another."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message}
+    ]
+
+    try:
+        response = await client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            tools=OPENAI_TOOLS,
+            tool_choice="auto"
+        )
+    except Exception as e:
+        logger.error(f"OpenAI API error: {e}")
+        raise Exception(f"AI error: {str(e)}")
+
+    max_iterations = 5
+    iteration = 0
+    message = response.choices[0].message
+
+    while message.tool_calls and iteration < max_iterations:
+        iteration += 1
+        logger.info(f"OpenAI agentic iteration {iteration}, tool calls: {[c.function.name for c in message.tool_calls]}")
+        
+        # Add the assistant's tool call message to history
+        messages.append(message)
+
+        for tool_call in message.tool_calls:
+            logger.info(f"Executing tool: {tool_call.function.name} with args: {tool_call.function.arguments}")
+            try:
+                args = json.loads(tool_call.function.arguments)
+                result = execute_github_tool(
+                    tool_call.function.name,
+                    args,
+                    github_token
+                )
+            except Exception as e:
+                result = f"Tool error ({tool_call.function.name}): {str(e)}"
+                logger.error(result)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": tool_call.function.name,
+                "content": result
+            })
+
+        try:
+            response = await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=OPENAI_TOOLS,
+                tool_choice="auto"
+            )
+            message = response.choices[0].message
+        except Exception as e:
+            logger.error(f"OpenAI API error on iteration {iteration}: {e}")
+            raise Exception(f"AI error during tool processing: {str(e)}")
+
+    if message.content:
+        return message.content.strip()
+    return "Task completed, but no summary was returned."
+
+async def agentic_workflow_fallback(user_message: str, github_token: str, user_id: int) -> str:
+    """Wrapper that tries Gemini, then Groq, then OpenRouter."""
+    try:
+        logger.info("Attempting agentic_workflow with Gemini...")
+        return await agentic_workflow(user_message, github_token, user_id)
+    except Exception as e:
+        logger.warning(f"Gemini workflow failed: {e}. Falling back to Groq...")
+        
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if groq_api_key and groq_api_key != "your_groq_api_key":
+        try:
+            client = AsyncOpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1")
+            return await agentic_workflow_openai(user_message, github_token, user_id, client, "llama3-70b-8192")
+        except Exception as e:
+            logger.warning(f"Groq workflow failed: {e}. Falling back to OpenRouter...")
+            
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+    if openrouter_api_key and openrouter_api_key != "your_openrouter_api_key":
+        try:
+            client = AsyncOpenAI(api_key=openrouter_api_key, base_url="https://openrouter.ai/api/v1")
+            return await agentic_workflow_openai(user_message, github_token, user_id, client, "anthropic/claude-3.5-sonnet")
+        except Exception as e:
+            logger.warning(f"OpenRouter workflow failed: {e}.")
+            
+    raise Exception("All configured AI providers failed.")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command - welcome message"""
@@ -488,7 +610,7 @@ async def repo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         github_token = os.getenv("GITHUB_TOKEN")
         try:
             full_prompt = f"[Active Repository: {repo}]\n\n{prompt}"
-            result = await agentic_workflow(full_prompt, github_token, user_id)
+            result = await agentic_workflow_fallback(full_prompt, github_token, user_id)
             if len(result) > 4000:
                 await query.message.reply_text(result[:4000] + "\n...[truncated]")
             else:
@@ -514,7 +636,7 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "My repo is: <repo_owner>/<repo_name>"
         )
         
-        result = await agentic_workflow(test_message, github_token, user_id)
+        result = await agentic_workflow_fallback(test_message, github_token, user_id)
         await update.message.reply_text(f"✅ Result:\n{result[:1000]}")
     
     except Exception as e:
@@ -542,7 +664,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         
         # Run agentic workflow
-        response = await agentic_workflow(user_message, github_token, user_id)
+        response = await agentic_workflow_fallback(user_message, github_token, user_id)
         
         # Send response (Telegram has 4096 char limit)
         if len(response) > 4000:
