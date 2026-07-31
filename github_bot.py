@@ -36,7 +36,7 @@ GITHUB_TOOLS = [
     {
         "name": "read_file",
         "description": "Read a file from GitHub repository",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "repo": {"type": "string", "description": "Repository name (owner/repo)"},
@@ -49,7 +49,7 @@ GITHUB_TOOLS = [
     {
         "name": "edit_and_commit",
         "description": "Edit a file and commit changes to GitHub",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "repo": {"type": "string", "description": "Repository name (owner/repo)"},
@@ -64,7 +64,7 @@ GITHUB_TOOLS = [
     {
         "name": "list_files",
         "description": "List files in a directory of the repository",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "repo": {"type": "string", "description": "Repository name (owner/repo)"},
@@ -77,7 +77,7 @@ GITHUB_TOOLS = [
     {
         "name": "create_branch",
         "description": "Create a new branch in the repository",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "repo": {"type": "string", "description": "Repository name (owner/repo)"},
