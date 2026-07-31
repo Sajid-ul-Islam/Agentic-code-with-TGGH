@@ -148,7 +148,7 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
     
     # Create model with tools
     model = genai.GenerativeModel(
-        "gemini-2.0-flash",
+        "gemini-flash-latest",
         tools=GITHUB_TOOLS
     )
     
