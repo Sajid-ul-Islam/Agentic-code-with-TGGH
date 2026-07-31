@@ -140,78 +140,106 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
     3. Execute tools and get results
     4. Gemini synthesizes final response
     """
-    
+    system_prompt = (
+        "You are an AI assistant that helps users interact with their GitHub repositories. "
+        "When the user mentions a task (review code, list files, fix a bug, etc.), "
+        "use the available tools to read files, make edits, or create branches as needed. "
+        "If an [Active Repository: owner/repo] tag appears at the start of the message, "
+        "always use that as the repository for all tool calls unless the user explicitly specifies another."
+    )
+
     messages = [
         {
             "role": "user",
             "parts": [user_message]
         }
     ]
-    
-    # Create model with tools
+
+    # Create model with tools and system instruction
     model = genai.GenerativeModel(
         "gemini-flash-latest",
-        tools=GITHUB_TOOLS
+        tools=GITHUB_TOOLS,
+        system_instruction=system_prompt
     )
-    
-    # First call to Gemini
-    response = model.generate_content(
-        messages,
-        tool_config={'function_calling_config': 'AUTO'}
-    )
-    
-    # Process tool calls in a loop
-    max_iterations = 5
-    iteration = 0
-    
-    while response.candidates[0].content.parts[-1].function_calls and iteration < max_iterations:
-        iteration += 1
-        
-        tool_calls = response.candidates[0].content.parts[-1].function_calls
-        tool_results = []
-        
-        for tool_call in tool_calls:
-            logger.info(f"Executing tool: {tool_call.name}")
-            
-            # Execute the tool
-            result = execute_github_tool(
-                tool_call.name,
-                dict(tool_call.args),
-                github_token
-            )
-            
-            tool_results.append({
-                "function_name": tool_call.name,
-                "content": result
-            })
-        
-        # Add assistant response and tool results to messages
-        messages.append(response.candidates[0].content)
-        
-        messages.append({
-            "role": "user",
-            "parts": [
-                genai.types.Part.from_function_response(
-                    name=result["function_name"],
-                    response={"result": result["content"]}
-                )
-                for result in tool_results
-            ]
-        })
-        
-        # Second call with results
+
+    try:
+        # First call to Gemini
         response = model.generate_content(
             messages,
             tool_config={'function_calling_config': 'AUTO'}
         )
-    
+    except Exception as e:
+        logger.error(f"Gemini API error: {e}")
+        raise Exception(f"AI error: {str(e)}")
+
+    # Process tool calls in a loop
+    max_iterations = 5
+    iteration = 0
+
+    def _get_function_calls(resp):
+        """Extract all function_call parts from a response"""
+        calls = []
+        for part in resp.candidates[0].content.parts:
+            if hasattr(part, 'function_call') and part.function_call.name:
+                calls.append(part.function_call)
+        return calls
+
+    func_calls = _get_function_calls(response)
+
+    while func_calls and iteration < max_iterations:
+        iteration += 1
+        logger.info(f"Agentic iteration {iteration}, tool calls: {[c.name for c in func_calls]}")
+
+        tool_results = []
+        for tool_call in func_calls:
+            logger.info(f"Executing tool: {tool_call.name} with args: {dict(tool_call.args)}")
+            try:
+                result = execute_github_tool(
+                    tool_call.name,
+                    dict(tool_call.args),
+                    github_token
+                )
+            except Exception as e:
+                result = f"Tool error ({tool_call.name}): {str(e)}"
+                logger.error(result)
+
+            tool_results.append({
+                "function_name": tool_call.name,
+                "content": result
+            })
+
+        # Add model response and tool results to history
+        messages.append(response.candidates[0].content)
+        messages.append({
+            "role": "user",
+            "parts": [
+                genai.types.Part.from_function_response(
+                    name=r["function_name"],
+                    response={"result": r["content"]}
+                )
+                for r in tool_results
+            ]
+        })
+
+        try:
+            response = model.generate_content(
+                messages,
+                tool_config={'function_calling_config': 'AUTO'}
+            )
+        except Exception as e:
+            logger.error(f"Gemini API error on iteration {iteration}: {e}")
+            raise Exception(f"AI error during tool processing: {str(e)}")
+
+        func_calls = _get_function_calls(response)
+
     # Extract final text response
     final_response = ""
     for part in response.candidates[0].content.parts:
-        if hasattr(part, 'text'):
+        if hasattr(part, 'text') and part.text:
             final_response += part.text
-    
-    return final_response if final_response else "Task completed. No additional notes."
+
+    return final_response.strip() if final_response.strip() else "Task completed, but no summary was returned."
+
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
