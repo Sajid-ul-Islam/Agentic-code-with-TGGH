@@ -7,6 +7,7 @@ Uses Gemini API with tool_use to decide GitHub actions
 import os
 import json
 import logging
+import asyncio
 from typing import Optional
 from dotenv import load_dotenv
 from telegram import Update
@@ -333,6 +334,14 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     logger.info("Bot started. Press Ctrl+C to stop.")
+    
+    # Ensure event loop exists for Python 3.14+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
