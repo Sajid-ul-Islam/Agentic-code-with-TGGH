@@ -25,9 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global state (in production, use database)
-USER_CREDENTIALS = {}  # {user_id: {"github_token": "...", "gemini_key": "..."}}
-
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -37,11 +34,11 @@ GITHUB_TOOLS = [
         "name": "read_file",
         "description": "Read a file from GitHub repository",
         "parameters": {
-            "type": "object",
+            "type": "OBJECT",
             "properties": {
-                "repo": {"type": "string", "description": "Repository name (owner/repo)"},
-                "path": {"type": "string", "description": "File path in repo"},
-                "branch": {"type": "string", "description": "Branch name (default: main)"}
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"},
+                "path": {"type": "STRING", "description": "File path in repo"},
+                "branch": {"type": "STRING", "description": "Branch name (default: main)"}
             },
             "required": ["repo", "path"]
         }
@@ -50,13 +47,13 @@ GITHUB_TOOLS = [
         "name": "edit_and_commit",
         "description": "Edit a file and commit changes to GitHub",
         "parameters": {
-            "type": "object",
+            "type": "OBJECT",
             "properties": {
-                "repo": {"type": "string", "description": "Repository name (owner/repo)"},
-                "path": {"type": "string", "description": "File path"},
-                "new_content": {"type": "string", "description": "New file content"},
-                "commit_message": {"type": "string", "description": "Commit message"},
-                "branch": {"type": "string", "description": "Branch to commit to (default: main)"}
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"},
+                "path": {"type": "STRING", "description": "File path"},
+                "new_content": {"type": "STRING", "description": "New file content"},
+                "commit_message": {"type": "STRING", "description": "Commit message"},
+                "branch": {"type": "STRING", "description": "Branch to commit to (default: main)"}
             },
             "required": ["repo", "path", "new_content", "commit_message"]
         }
@@ -65,11 +62,11 @@ GITHUB_TOOLS = [
         "name": "list_files",
         "description": "List files in a directory of the repository",
         "parameters": {
-            "type": "object",
+            "type": "OBJECT",
             "properties": {
-                "repo": {"type": "string", "description": "Repository name (owner/repo)"},
-                "path": {"type": "string", "description": "Directory path (empty for root)"},
-                "branch": {"type": "string", "description": "Branch name (default: main)"}
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"},
+                "path": {"type": "STRING", "description": "Directory path (empty for root)"},
+                "branch": {"type": "STRING", "description": "Branch name (default: main)"}
             },
             "required": ["repo"]
         }
@@ -78,11 +75,11 @@ GITHUB_TOOLS = [
         "name": "create_branch",
         "description": "Create a new branch in the repository",
         "parameters": {
-            "type": "object",
+            "type": "OBJECT",
             "properties": {
-                "repo": {"type": "string", "description": "Repository name (owner/repo)"},
-                "branch_name": {"type": "string", "description": "Name of new branch"},
-                "from_branch": {"type": "string", "description": "Branch to create from (default: main)"}
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"},
+                "branch_name": {"type": "STRING", "description": "Name of new branch"},
+                "from_branch": {"type": "STRING", "description": "Branch to create from (default: main)"}
             },
             "required": ["repo", "branch_name"]
         }
@@ -224,10 +221,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start command - show setup instructions"""
     await update.message.reply_text(
         "🤖 GitHub Telegram Bot\n\n"
-        "Setup:\n"
-        "1. `/auth_github <your_github_token>`\n"
-        "2. `/test` - Quick test\n\n"
-        "Then just ask me things like:\n"
+        "Just ask me things like:\n"
         "- Fix the null pointer in auth.js\n"
         "- Add error handling to this function\n"
         "- Show me the latest commit in main branch\n\n"
@@ -235,45 +229,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def auth_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Set GitHub token for user"""
-    if not context.args:
-        await update.message.reply_text("Usage: /auth_github <your_github_token>")
-        return
-    
-    token = context.args[0]
-    user_id = update.effective_user.id
-    
-    # Validate token by trying a simple API call
-    try:
-        gh = GitHubHelper(token)
-        # This will fail if token is invalid
-        gh.get_user_repos()
-        
-        USER_CREDENTIALS[user_id] = {
-            "github_token": token,
-            "gemini_key": os.getenv("GEMINI_API_KEY")
-        }
-        
-        await update.message.reply_text(
-            "✅ GitHub token saved securely!\n"
-            "Ready to work. Try: /test"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Token validation failed: {str(e)}")
-
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Quick test"""
-    user_id = update.effective_user.id
-    
-    if user_id not in USER_CREDENTIALS:
-        await update.message.reply_text("First run: /auth_github <your_token>")
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        await update.message.reply_text("❌ GITHUB_TOKEN not set in environment.")
         return
     
     await update.message.reply_text("🔄 Testing... (this may take 10-15 seconds)")
     
-    github_token = USER_CREDENTIALS[user_id]["github_token"]
+    user_id = update.effective_user.id
     
     try:
         # Test message
@@ -291,19 +257,18 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user messages - send to Gemini agentic workflow"""
-    user_id = update.effective_user.id
-    
-    if user_id not in USER_CREDENTIALS:
-        await update.message.reply_text("First run: /auth_github <your_github_token>")
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        await update.message.reply_text("❌ GITHUB_TOKEN not set in environment.")
         return
     
     user_message = update.message.text
+    user_id = update.effective_user.id
     
     # Show typing indicator
     await update.message.chat.send_action("typing")
     
     try:
-        github_token = USER_CREDENTIALS[user_id]["github_token"]
         
         # Run agentic workflow
         response = await agentic_workflow(user_message, github_token, user_id)
@@ -329,7 +294,6 @@ def main() -> None:
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("auth_github", auth_github))
     app.add_handler(CommandHandler("test", test_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     

@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  github-telegram-bot:
+    build: .
+    container_name: github-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
