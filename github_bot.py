@@ -10,7 +10,7 @@ import logging
 import asyncio
 from typing import Optional
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 import google.generativeai as genai
 from github_helper import GitHubHelper
@@ -215,14 +215,20 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start command - show setup instructions"""
+    """Start command - welcome message"""
+    keyboard = [[InlineKeyboardButton("📂 Browse My Repositories", callback_data="show_repos:0:")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "🤖 GitHub Telegram Bot\n\n"
-        "Just ask me things like:\n"
-        "- Fix the null pointer in auth.js\n"
-        "- Add error handling to this function\n"
-        "- Show me the latest commit in main branch\n\n"
-        "I'll read your GitHub repo, make changes, and push them! 🚀"
+        "Hey! I'm your AI-powered GitHub assistant 👋\n\n"
+        "Just talk to me naturally — no commands needed!\n\n"
+        "You can say things like:\n"
+        "• *Show me files in my project*\n"
+        "• *Add error handling to auth.py*\n"
+        "• *Create a hotfix branch*\n"
+        "• *Commit my changes with a good message*\n\n"
+        "First, pick a repository to work with 👇",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
     )
 
 
@@ -315,6 +321,12 @@ async def repo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         github_token = os.getenv("GITHUB_TOKEN")
         await _send_repos_page(query.message, github_token, search_term, page, user_id)
 
+    elif data.startswith("show_repos:"):
+        _, page_str, search_term = data.split(":", 2)
+        page = int(page_str)
+        github_token = os.getenv("GITHUB_TOKEN")
+        await _send_repos_page(query.message, github_token, search_term, page, user_id)
+
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Quick test"""
     github_token = os.getenv("GITHUB_TOKEN")
@@ -373,6 +385,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
+async def post_init(application: Application) -> None:
+    """Register bot commands so they show in Telegram's / menu"""
+    await application.bot.set_my_commands([
+        BotCommand("start", "Start the bot & pick a repo"),
+        BotCommand("repos", "Browse or search your GitHub repos"),
+        BotCommand("test", "Run a quick connection test"),
+    ])
+
+
 def main() -> None:
     """Start the bot"""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -380,7 +401,7 @@ def main() -> None:
         raise ValueError("TELEGRAM_BOT_TOKEN not set")
     
     # Create app
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(post_init).build()
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
