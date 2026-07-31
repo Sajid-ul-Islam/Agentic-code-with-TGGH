@@ -34,7 +34,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 GITHUB_TOOLS = [
     {
         "name": "read_file",
-        "description": "Read a file from GitHub repository",
+        "description": "Read the content of a file from a GitHub repository",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -47,7 +47,7 @@ GITHUB_TOOLS = [
     },
     {
         "name": "edit_and_commit",
-        "description": "Edit a file and commit changes to GitHub",
+        "description": "Create or edit a file and commit the changes to GitHub. Also use this to create new files.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -58,6 +58,20 @@ GITHUB_TOOLS = [
                 "branch": {"type": "STRING", "description": "Branch to commit to (default: main)"}
             },
             "required": ["repo", "path", "new_content", "commit_message"]
+        }
+    },
+    {
+        "name": "delete_file",
+        "description": "Delete a file from the repository and commit the deletion",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"},
+                "path": {"type": "STRING", "description": "File path to delete"},
+                "commit_message": {"type": "STRING", "description": "Commit message"},
+                "branch": {"type": "STRING", "description": "Branch (default: main)"}
+            },
+            "required": ["repo", "path", "commit_message"]
         }
     },
     {
@@ -84,6 +98,45 @@ GITHUB_TOOLS = [
                 "from_branch": {"type": "STRING", "description": "Branch to create from (default: main)"}
             },
             "required": ["repo", "branch_name"]
+        }
+    },
+    {
+        "name": "list_branches",
+        "description": "List all branches in the repository",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"}
+            },
+            "required": ["repo"]
+        }
+    },
+    {
+        "name": "get_commits",
+        "description": "Get the latest commits from a branch",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"},
+                "branch": {"type": "STRING", "description": "Branch name (default: main)"},
+                "count": {"type": "INTEGER", "description": "Number of commits to return (default: 5)"}
+            },
+            "required": ["repo"]
+        }
+    },
+    {
+        "name": "create_pull_request",
+        "description": "Create a pull request from one branch to another",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "repo": {"type": "STRING", "description": "Repository name (owner/repo)"},
+                "title": {"type": "STRING", "description": "Pull request title"},
+                "body": {"type": "STRING", "description": "Pull request description"},
+                "head": {"type": "STRING", "description": "The branch with changes"},
+                "base": {"type": "STRING", "description": "The branch to merge into (default: main)"}
+            },
+            "required": ["repo", "title", "head"]
         }
     }
 ]
@@ -112,13 +165,22 @@ def execute_github_tool(tool_name: str, tool_input: dict, github_token: str) -> 
             )
             return f"Committed successfully: {result}"
         
+        elif tool_name == "delete_file":
+            result = gh.delete_file(
+                tool_input["repo"],
+                tool_input["path"],
+                tool_input["commit_message"],
+                tool_input.get("branch", "main")
+            )
+            return f"File deleted: {result}"
+        
         elif tool_name == "list_files":
             files = gh.list_files(
                 tool_input["repo"],
                 tool_input.get("path", ""),
                 tool_input.get("branch", "main")
             )
-            return f"Files:\n" + "\n".join(files)
+            return "Files:\n" + "\n".join(files)
         
         elif tool_name == "create_branch":
             result = gh.create_branch(
@@ -127,6 +189,31 @@ def execute_github_tool(tool_name: str, tool_input: dict, github_token: str) -> 
                 tool_input.get("from_branch", "main")
             )
             return f"Branch created: {result}"
+        
+        elif tool_name == "list_branches":
+            branches = gh.list_branches(tool_input["repo"])
+            return "Branches:\n" + "\n".join(branches)
+        
+        elif tool_name == "get_commits":
+            commits = gh.get_latest_commits(
+                tool_input["repo"],
+                tool_input.get("branch", "main"),
+                int(tool_input.get("count", 5))
+            )
+            return f"Recent commits:\n{commits}"
+        
+        elif tool_name == "create_pull_request":
+            result = gh.create_pull_request(
+                tool_input["repo"],
+                tool_input["title"],
+                tool_input.get("body", ""),
+                tool_input["head"],
+                tool_input.get("base", "main")
+            )
+            return f"Pull request created: {result}"
+        
+        else:
+            return f"Unknown tool: {tool_name}"
     
     except Exception as e:
         return f"Error: {str(e)}"
@@ -213,9 +300,11 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
         messages.append({
             "role": "user",
             "parts": [
-                genai.types.Part.from_function_response(
-                    name=r["function_name"],
-                    response={"result": r["content"]}
+                genai.protos.Part(
+                    function_response=genai.protos.FunctionResponse(
+                        name=r["function_name"],
+                        response={"result": r["content"]}
+                    )
                 )
                 for r in tool_results
             ]
@@ -341,7 +430,27 @@ async def repo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             USER_STATE[user_id] = {}
         USER_STATE[user_id]["selected_repo"] = selected_repo
         
-        await query.edit_message_text(f"✅ Selected repository: **{selected_repo}**")
+        await query.edit_message_text(
+            f"✅ Active repo set to: `{selected_repo}`\n\n"
+            f"What would you like to do?",
+            parse_mode="Markdown"
+        )
+        
+        # Send suggestions as a follow-up message
+        suggestions_keyboard = [
+            [InlineKeyboardButton("📋 List files", callback_data=f"quick:list_files"),
+             InlineKeyboardButton("📜 Recent commits", callback_data=f"quick:get_commits")],
+            [InlineKeyboardButton("🌿 List branches", callback_data=f"quick:list_branches"),
+             InlineKeyboardButton("🔍 Review code", callback_data=f"quick:review_code")],
+            [InlineKeyboardButton("🐛 Find bugs", callback_data=f"quick:find_bugs"),
+             InlineKeyboardButton("📝 Add README", callback_data=f"quick:add_readme")],
+            [InlineKeyboardButton("🌿 Create branch", callback_data=f"quick:create_branch"),
+             InlineKeyboardButton("🔀 Open a PR", callback_data=f"quick:create_pr")],
+        ]
+        await query.message.reply_text(
+            "Or pick a quick action:",
+            reply_markup=InlineKeyboardMarkup(suggestions_keyboard)
+        )
         
     elif data.startswith("page:"):
         _, page_str, search_term = data.split(":", 2)
@@ -354,6 +463,38 @@ async def repo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         page = int(page_str)
         github_token = os.getenv("GITHUB_TOKEN")
         await _send_repos_page(query.message, github_token, search_term, page, user_id)
+
+    elif data.startswith("quick:"):
+        action = data.split(":", 1)[1]
+        repo = USER_STATE.get(user_id, {}).get("selected_repo", "")
+        if not repo:
+            await query.message.reply_text("⚠️ Please select a repository first with /repos")
+            return
+        
+        quick_prompts = {
+            "list_files":    f"List all files in the root of {repo}",
+            "get_commits":   f"Show me the last 5 commits in {repo}",
+            "list_branches": f"List all branches in {repo}",
+            "review_code":   f"Review the main source files in {repo} and give me a summary of what the code does",
+            "find_bugs":     f"Read the main files in {repo} and identify potential bugs or issues",
+            "add_readme":    f"Read the existing README.md or files in {repo} and create/update a comprehensive README.md",
+            "create_branch": f"Ask me what to name the new branch, then create it in {repo}",
+            "create_pr":     f"List the branches in {repo} and help me create a pull request",
+        }
+        
+        prompt = quick_prompts.get(action, f"Help me with {repo}")
+        await query.message.reply_text(f"⏳ Working on it...")
+        
+        github_token = os.getenv("GITHUB_TOKEN")
+        try:
+            full_prompt = f"[Active Repository: {repo}]\n\n{prompt}"
+            result = await agentic_workflow(full_prompt, github_token, user_id)
+            if len(result) > 4000:
+                await query.message.reply_text(result[:4000] + "\n...[truncated]")
+            else:
+                await query.message.reply_text(result)
+        except Exception as e:
+            await query.message.reply_text(f"❌ Error: {str(e)}")
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Quick test"""

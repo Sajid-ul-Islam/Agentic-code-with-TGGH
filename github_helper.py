@@ -89,6 +89,38 @@ class GitHubHelper:
         
         except GithubException as e:
             raise Exception(f"GitHub error: {e.data}")
+            
+    def delete_file(
+        self,
+        repo_name: str,
+        file_path: str,
+        commit_message: str,
+        branch: str = "main"
+    ) -> str:
+        """
+        Delete a file and commit changes
+        
+        Args:
+            repo_name: "owner/repo" format
+            file_path: Path to file
+            commit_message: Commit message
+            branch: Branch to commit to
+        
+        Returns:
+            Commit SHA
+        """
+        try:
+            repo = self.gh.get_repo(repo_name)
+            contents = repo.get_contents(file_path, ref=branch)
+            result = repo.delete_file(
+                path=file_path,
+                message=commit_message,
+                sha=contents.sha,
+                branch=branch
+            )
+            return result['commit'].sha
+        except GithubException as e:
+            raise Exception(f"GitHub error: {e.data}")
     
     def list_files(self, repo_name: str, path: str = "", branch: str = "main") -> List[str]:
         """
@@ -156,6 +188,14 @@ class GitHubHelper:
         
         except GithubException as e:
             raise Exception(f"GitHub error: {e.data}")
+
+    def list_branches(self, repo_name: str) -> List[str]:
+        """List all branches in the repository"""
+        try:
+            repo = self.gh.get_repo(repo_name)
+            return [branch.name for branch in repo.get_branches()]
+        except GithubException as e:
+            raise Exception(f"GitHub error: {e.data}")
     
     def get_commit_diff(
         self,
@@ -198,5 +238,26 @@ class GitHubHelper:
             
             return commit_text
         
+        except GithubException as e:
+            raise Exception(f"GitHub error: {e.data}")
+
+    def create_pull_request(
+        self,
+        repo_name: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main"
+    ) -> str:
+        """Create a pull request"""
+        try:
+            repo = self.gh.get_repo(repo_name)
+            pr = repo.create_pull(
+                title=title,
+                body=body,
+                head=head,
+                base=base
+            )
+            return f"PR #{pr.number}: {pr.html_url}"
         except GithubException as e:
             raise Exception(f"GitHub error: {e.data}")
