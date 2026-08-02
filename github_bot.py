@@ -521,7 +521,7 @@ async def agentic_workflow_fallback(user_message: str, github_token: str, user_i
     # 1. Try Gemini Models
     gemini_key = os.getenv("GEMINI_API_KEY")
     if gemini_key and gemini_key != "your_gemini_api_key_here":
-        for model_name in ["gemini-1.5-flash-latest", "gemini-1.5-pro-latest", "gemini-pro"]:
+        for model_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-flash-latest"]:
             try:
                 logger.info(f"Attempting workflow with Gemini ({model_name})...")
                 return await agentic_workflow(user_message, github_token, user_id, model_name=model_name)
@@ -533,7 +533,7 @@ async def agentic_workflow_fallback(user_message: str, github_token: str, user_i
     # 2. Try Groq Models
     groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
     if groq_api_key and groq_api_key not in ["your_groq_api_key", "your_grok_api_key"]:
-        for model_name in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]:
+        for model_name in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
             try:
                 logger.info(f"Attempting workflow with Groq ({model_name})...")
                 client = AsyncOpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1")
@@ -546,7 +546,7 @@ async def agentic_workflow_fallback(user_message: str, github_token: str, user_i
     # 3. Try OpenRouter Models
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_api_key and openrouter_api_key != "your_openrouter_api_key":
-        for model_name in ["meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free", "deepseek/deepseek-r1:free"]:
+        for model_name in ["google/gemini-2.0-flash-lite-001:free", "qwen/qwen-2.5-coder-32b-instruct:free", "meta-llama/llama-3.3-70b-instruct"]:
             try:
                 logger.info(f"Attempting workflow with OpenRouter ({model_name})...")
                 client = AsyncOpenAI(api_key=openrouter_api_key, base_url="https://openrouter.ai/api/v1")
@@ -894,15 +894,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         
         # Send response (Telegram has 4096 char limit)
         if len(response) > 4000:
-            await update.message.reply_text(response[:4000] + "\n...[truncated]")
+            await send_safe_message(update.message, response[:4000] + "\n...[truncated]", parse_mode="Markdown")
         else:
-            await update.message.reply_text(response)
+            await send_safe_message(update.message, response, parse_mode="Markdown")
         
         # Send pending diff notifications with approve/reject buttons
         await _send_pending_diffs(update.message, user_id)
     
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await send_safe_message(update.message, f"❌ Error: {str(e)}", parse_mode=None)
 
 
 async def post_init(application: Application) -> None:
