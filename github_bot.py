@@ -321,7 +321,7 @@ def execute_github_tool(tool_name: str, tool_input: dict, github_token: str, use
         return f"Error: {str(e)}"
 
 
-async def agentic_workflow(user_message: str, github_token: str, user_id: int) -> str:
+async def agentic_workflow(user_message: str, github_token: str, user_id: int, model_name: str = "gemini-1.5-flash") -> str:
     """
     Run Gemini agentic workflow:
     1. Send user request to Gemini with GitHub tools
@@ -346,7 +346,7 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
 
     # Create model with tools and system instruction
     model = genai.GenerativeModel(
-        "gemini-flash-latest",
+        model_name,
         tools=GITHUB_TOOLS,
         system_instruction=system_prompt
     )
@@ -510,30 +510,67 @@ async def agentic_workflow_openai(user_message: str, github_token: str, user_id:
     return "Task completed, but no summary was returned."
 
 async def agentic_workflow_fallback(user_message: str, github_token: str, user_id: int) -> str:
-    """Wrapper that tries Gemini, then Groq, then OpenRouter."""
-    try:
-        logger.info("Attempting agentic_workflow with Gemini...")
-        return await agentic_workflow(user_message, github_token, user_id)
-    except Exception as e:
-        logger.warning(f"Gemini workflow failed: {e}. Falling back to Groq...")
-        
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    if groq_api_key and groq_api_key != "your_groq_api_key":
-        try:
-            client = AsyncOpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1")
-            return await agentic_workflow_openai(user_message, github_token, user_id, client, "llama3-70b-8192")
-        except Exception as e:
-            logger.warning(f"Groq workflow failed: {e}. Falling back to OpenRouter...")
-            
+    """
+    Precise Multi-Provider & Multi-Model Fallback Chain:
+    1. Gemini models: gemini-1.5-flash -> gemini-2.0-flash-exp -> gemini-1.5-pro
+    2. Groq models: llama-3.3-70b-versatile -> llama-3.1-8b-instant -> mixtral-8x7b-32768
+    3. OpenRouter models: meta-llama/llama-3.3-70b-instruct:free -> google/gemini-2.0-flash-exp:free -> deepseek/deepseek-r1:free
+    """
+    errors = []
+
+    # 1. Try Gemini Models
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if gemini_key and gemini_key != "your_gemini_api_key_here":
+        for model_name in ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro"]:
+            try:
+                logger.info(f"Attempting workflow with Gemini ({model_name})...")
+                return await agentic_workflow(user_message, github_token, user_id, model_name=model_name)
+            except Exception as e:
+                err_msg = f"Gemini ({model_name}): {str(e)}"
+                logger.warning(f"{err_msg}. Retrying next model...")
+                errors.append(err_msg)
+
+    # 2. Try Groq Models
+    groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROK_API_KEY")
+    if groq_api_key and groq_api_key not in ["your_groq_api_key", "your_grok_api_key"]:
+        for model_name in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"]:
+            try:
+                logger.info(f"Attempting workflow with Groq ({model_name})...")
+                client = AsyncOpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1")
+                return await agentic_workflow_openai(user_message, github_token, user_id, client, model_name)
+            except Exception as e:
+                err_msg = f"Groq ({model_name}): {str(e)}"
+                logger.warning(f"{err_msg}. Retrying next model...")
+                errors.append(err_msg)
+
+    # 3. Try OpenRouter Models
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_api_key and openrouter_api_key != "your_openrouter_api_key":
-        try:
-            client = AsyncOpenAI(api_key=openrouter_api_key, base_url="https://openrouter.ai/api/v1")
-            return await agentic_workflow_openai(user_message, github_token, user_id, client, "anthropic/claude-3.5-sonnet")
-        except Exception as e:
-            logger.warning(f"OpenRouter workflow failed: {e}.")
-            
-    raise Exception("All configured AI providers failed.")
+        for model_name in ["meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.0-flash-exp:free", "deepseek/deepseek-r1:free"]:
+            try:
+                logger.info(f"Attempting workflow with OpenRouter ({model_name})...")
+                client = AsyncOpenAI(api_key=openrouter_api_key, base_url="https://openrouter.ai/api/v1")
+                return await agentic_workflow_openai(user_message, github_token, user_id, client, model_name)
+            except Exception as e:
+                err_msg = f"OpenRouter ({model_name}): {str(e)}"
+                logger.warning(f"{err_msg}. Retrying next model...")
+                errors.append(err_msg)
+
+    # 4. Try GitHub Models / Copilot API (using GITHUB_TOKEN)
+    if github_token and github_token != "your_github_token_here":
+        for model_name in ["gpt-4o-mini", "gpt-4o", "meta-llama-3.3-70b-instruct"]:
+            try:
+                logger.info(f"Attempting workflow with GitHub Models ({model_name})...")
+                client = AsyncOpenAI(api_key=github_token, base_url="https://models.inference.ai.azure.com")
+                return await agentic_workflow_openai(user_message, github_token, user_id, client, model_name)
+            except Exception as e:
+                err_msg = f"GitHub Models ({model_name}): {str(e)}"
+                logger.warning(f"{err_msg}. Retrying next model...")
+                errors.append(err_msg)
+
+    # Detailed synthesis if everything failed
+    error_summary = "\n".join(f"• {e}" for e in errors) if errors else "No AI API keys configured."
+    raise Exception(f"All configured AI providers failed:\n{error_summary}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
