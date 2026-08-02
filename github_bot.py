@@ -8,6 +8,8 @@ import os
 import json
 import logging
 import asyncio
+import uuid
+import difflib
 from typing import Optional
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -24,9 +26,41 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(__name__)
+logger = logger = logging.getLogger(__name__)
 
 USER_STATE = {}  # {user_id: {"selected_repo": "..."}}
+PENDING_EDITS = {}  # {edit_id: {...}}
+
+STATE_FILE = "user_state.json"
+
+def load_user_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                return {int(k): v for k, v in data.items()}
+        except Exception as e:
+            logger.error(f"Error loading user_state.json: {e}")
+    return {}
+
+def save_user_state():
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(USER_STATE, f)
+    except Exception as e:
+        logger.error(f"Error saving user_state.json: {e}")
+
+USER_STATE = load_user_state()
+
+def generate_diff(old_content: str, new_content: str, file_path: str) -> str:
+    old_lines = old_content.splitlines(keepends=True) if old_content else []
+    new_lines = new_content.splitlines(keepends=True) if new_content else []
+    diff_lines = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}"
+    ))
+    return "".join(diff_lines)
 
 # Initialize Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -163,9 +197,18 @@ def convert_to_openai_tools(gemini_tools):
 OPENAI_TOOLS = convert_to_openai_tools(GITHUB_TOOLS)
 
 
-def execute_github_tool(tool_name: str, tool_input: dict, github_token: str) -> str:
+def execute_github_tool(tool_name: str, tool_input: dict, github_token: str, user_id: Optional[int] = None) -> str:
     """Execute a GitHub tool using GitHubHelper"""
     gh = GitHubHelper(github_token)
+    
+    # Auto-fallback repo if generic, missing, or without owner
+    user_repo = USER_STATE.get(user_id, {}).get("selected_repo") if user_id else None
+    input_repo = tool_input.get("repo", "")
+    generic_repos = ["owner/repo", "<repo_owner>/<repo_name>", "your_username/your_repo", "username/repo"]
+    if user_repo:
+        if not input_repo or input_repo in generic_repos or "/" not in input_repo:
+            tool_input["repo"] = user_repo
+
     
     try:
         if tool_name == "read_file":
@@ -177,23 +220,61 @@ def execute_github_tool(tool_name: str, tool_input: dict, github_token: str) -> 
             return f"File content:\n{content}"
         
         elif tool_name == "edit_and_commit":
-            result = gh.edit_and_commit(
-                tool_input["repo"],
-                tool_input["path"],
-                tool_input["new_content"],
-                tool_input["commit_message"],
-                tool_input.get("branch", "main")
-            )
-            return f"Committed successfully: {result}"
+            repo = tool_input["repo"]
+            path = tool_input["path"]
+            new_content = tool_input["new_content"]
+            commit_msg = tool_input["commit_message"]
+            branch = tool_input.get("branch", "main")
+            
+            try:
+                old_content = gh.read_file(repo, path, branch)
+            except Exception:
+                old_content = ""
+            
+            diff = generate_diff(old_content, new_content, path)
+            if not diff:
+                diff = f"+++ {path}\n(No changes detected or new file with same content)"
+                
+            edit_id = str(uuid.uuid4())[:8]
+            PENDING_EDITS[edit_id] = {
+                "type": "edit",
+                "repo": repo,
+                "path": path,
+                "new_content": new_content,
+                "commit_message": commit_msg,
+                "branch": branch,
+                "diff": diff,
+                "user_id": user_id,
+                "github_token": github_token,
+                "notified": False
+            }
+            return f"Staged change for user review (Edit ID: {edit_id}). Unified diff generated:\n{diff}\nDo NOT commit directly; inform the user that changes are staged for approval."
         
         elif tool_name == "delete_file":
-            result = gh.delete_file(
-                tool_input["repo"],
-                tool_input["path"],
-                tool_input["commit_message"],
-                tool_input.get("branch", "main")
-            )
-            return f"File deleted: {result}"
+            repo = tool_input["repo"]
+            path = tool_input["path"]
+            commit_msg = tool_input["commit_message"]
+            branch = tool_input.get("branch", "main")
+            
+            try:
+                old_content = gh.read_file(repo, path, branch)
+            except Exception:
+                old_content = ""
+                
+            diff = generate_diff(old_content, "", path)
+            edit_id = str(uuid.uuid4())[:8]
+            PENDING_EDITS[edit_id] = {
+                "type": "delete",
+                "repo": repo,
+                "path": path,
+                "commit_message": commit_msg,
+                "branch": branch,
+                "diff": diff,
+                "user_id": user_id,
+                "github_token": github_token,
+                "notified": False
+            }
+            return f"Staged file deletion for user review (Edit ID: {edit_id}). Unified diff generated:\n{diff}\nDo NOT commit directly; inform the user that deletion is staged for approval."
         
         elif tool_name == "list_files":
             files = gh.list_files(
@@ -253,7 +334,7 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
         "When the user mentions a task (review code, list files, fix a bug, etc.), "
         "use the available tools to read files, make edits, or create branches as needed. "
         "If an [Active Repository: owner/repo] tag appears at the start of the message, "
-        "always use that as the repository for all tool calls unless the user explicitly specifies another."
+        "YOU MUST use that exact repository name for ALL tool calls! Do not guess or substitute placeholder repo names."
     )
 
     messages = [
@@ -305,7 +386,8 @@ async def agentic_workflow(user_message: str, github_token: str, user_id: int) -
                 result = execute_github_tool(
                     tool_call.name,
                     dict(tool_call.args),
-                    github_token
+                    github_token,
+                    user_id
                 )
             except Exception as e:
                 result = f"Tool error ({tool_call.name}): {str(e)}"
@@ -360,7 +442,7 @@ async def agentic_workflow_openai(user_message: str, github_token: str, user_id:
         "When the user mentions a task (review code, list files, fix a bug, etc.), "
         "use the available tools to read files, make edits, or create branches as needed. "
         "If an [Active Repository: owner/repo] tag appears at the start of the message, "
-        "always use that as the repository for all tool calls unless the user explicitly specifies another."
+        "YOU MUST use that exact repository name for ALL tool calls! Do not guess or substitute placeholder repo names."
     )
 
     messages = [
@@ -397,7 +479,8 @@ async def agentic_workflow_openai(user_message: str, github_token: str, user_id:
                 result = execute_github_tool(
                     tool_call.function.name,
                     args,
-                    github_token
+                    github_token,
+                    user_id
                 )
             except Exception as e:
                 result = f"Tool error ({tool_call.function.name}): {str(e)}"
@@ -551,6 +634,7 @@ async def repo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if user_id not in USER_STATE:
             USER_STATE[user_id] = {}
         USER_STATE[user_id]["selected_repo"] = selected_repo
+        save_user_state()
         
         await query.edit_message_text(
             f"✅ Active repo set to: `{selected_repo}`\n\n"
@@ -574,6 +658,52 @@ async def repo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_markup=InlineKeyboardMarkup(suggestions_keyboard)
         )
         
+    elif data.startswith("approve_edit:"):
+        edit_id = data.split(":", 1)[1]
+        edit_info = PENDING_EDITS.pop(edit_id, None)
+        if not edit_info:
+            await query.edit_message_text("⚠️ Change request expired or already processed.")
+            return
+        
+        await query.edit_message_text(f"⏳ Committing changes for `{edit_info['path']}`...")
+        try:
+            gh = GitHubHelper(edit_info["github_token"])
+            if edit_info["type"] == "edit":
+                sha = gh.edit_and_commit(
+                    edit_info["repo"],
+                    edit_info["path"],
+                    edit_info["new_content"],
+                    edit_info["commit_message"],
+                    edit_info["branch"]
+                )
+            else:
+                sha = gh.delete_file(
+                    edit_info["repo"],
+                    edit_info["path"],
+                    edit_info["commit_message"],
+                    edit_info["branch"]
+                )
+            await query.edit_message_text(
+                f"✅ *Changes Committed!*\n\n"
+                f"• *File:* `{edit_info['path']}`\n"
+                f"• *Commit SHA:* `{sha[:7]}`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Commit failed: {str(e)}")
+
+    elif data.startswith("reject_edit:"):
+        edit_id = data.split(":", 1)[1]
+        edit_info = PENDING_EDITS.pop(edit_id, None)
+        if edit_info:
+            await query.edit_message_text(
+                f"❌ *Change Rejected*\n\n"
+                f"Changes for `{edit_info['path']}` were discarded.",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.edit_message_text("⚠️ Change request expired or already processed.")
+
     elif data.startswith("page:"):
         _, page_str, search_term = data.split(":", 2)
         page = int(page_str)
@@ -615,6 +745,7 @@ async def repo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await query.message.reply_text(result[:4000] + "\n...[truncated]")
             else:
                 await query.message.reply_text(result)
+            await _send_pending_diffs(query.message, user_id)
         except Exception as e:
             await query.message.reply_text(f"❌ Error: {str(e)}")
 
@@ -643,6 +774,36 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
+async def _send_pending_diffs(message, user_id: int) -> None:
+    """Send pending diff notifications with approve/reject inline buttons"""
+    pending_keys = [k for k, v in PENDING_EDITS.items() if v.get("user_id") == user_id and not v.get("notified")]
+    for edit_id in pending_keys:
+        edit_info = PENDING_EDITS[edit_id]
+        edit_info["notified"] = True
+        diff_text = edit_info["diff"]
+        if len(diff_text) > 3000:
+            diff_text = diff_text[:3000] + "\n... [diff truncated]"
+        
+        msg_text = (
+            f"📝 *Pending Change Review* ({edit_info['type'].upper()})\n"
+            f"• *Repo:* `{edit_info['repo']}`\n"
+            f"• *File:* `{edit_info['path']}`\n"
+            f"• *Message:* _{edit_info['commit_message']}_\n\n"
+            f"```diff\n{diff_text}\n```"
+        )
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve & Commit", callback_data=f"approve_edit:{edit_id}"),
+                InlineKeyboardButton("❌ Reject Changes", callback_data=f"reject_edit:{edit_id}")
+            ]
+        ]
+        await message.reply_text(
+            msg_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user messages - send to Gemini agentic workflow"""
     github_token = os.getenv("GITHUB_TOKEN")
@@ -652,6 +813,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     user_message = update.message.text
     user_id = update.effective_user.id
+
+    # Auto-detect / persist active repo if not set
+    if user_id not in USER_STATE or 'selected_repo' not in USER_STATE[user_id]:
+        try:
+            gh = GitHubHelper(github_token)
+            repos = gh.get_user_repos()
+            if repos:
+                target_repo = "Sajid-ul-Islam/Agentic-code-with-TGGH" if "Sajid-ul-Islam/Agentic-code-with-TGGH" in repos else repos[0]
+                USER_STATE[user_id] = {"selected_repo": target_repo}
+                save_user_state()
+                logger.info(f"Auto-selected repository '{target_repo}' for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to auto-select repo: {e}")
 
     # Inject repo context if selected
     if user_id in USER_STATE and 'selected_repo' in USER_STATE[user_id]:
@@ -671,6 +845,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(response[:4000] + "\n...[truncated]")
         else:
             await update.message.reply_text(response)
+        
+        # Send pending diff notifications with approve/reject buttons
+        await _send_pending_diffs(update.message, user_id)
     
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")

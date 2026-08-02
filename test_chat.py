@@ -14,13 +14,16 @@ chat = model.start_chat()
 
 response = chat.send_message("What is the weather in Tokyo?")
 print("Response parts:", response.parts)
-if response.function_call:
-    print("Function call:", response.function_call.name, response.function_call.args)
+fc = response.parts[0].function_call
+if fc:
+    print("Function call:", fc.name, fc.args)
     # Send function result
     result_response = chat.send_message(
-        genai.types.Part.from_function_response(
-            name=response.function_call.name,
-            response={"result": get_weather(response.function_call.args['location'])}
-        )
+        {
+            "function_response": {
+                "name": fc.name,
+                "response": {"result": get_weather(fc.args['location'])}
+            }
+        }
     )
     print("Final response:", result_response.text)
