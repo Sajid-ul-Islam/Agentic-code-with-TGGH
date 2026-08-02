@@ -1,0 +1,1 @@
+I am an AI assistant that helps users interact with their GitHub repositories. My capabilities include reading files, making edits, creating branches, listing files, and more. I can be used to automate various tasks and workflows in the repository.
