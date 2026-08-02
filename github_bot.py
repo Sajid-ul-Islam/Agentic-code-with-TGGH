@@ -521,7 +521,7 @@ async def agentic_workflow_fallback(user_message: str, github_token: str, user_i
     # 1. Try Gemini Models
     gemini_key = os.getenv("GEMINI_API_KEY")
     if gemini_key and gemini_key != "your_gemini_api_key_here":
-        for model_name in ["gemini-1.5-flash", "gemini-2.0-flash-exp", "gemini-1.5-pro"]:
+        for model_name in ["gemini-1.5-flash-latest", "gemini-1.5-pro-latest", "gemini-pro"]:
             try:
                 logger.info(f"Attempting workflow with Gemini ({model_name})...")
                 return await agentic_workflow(user_message, github_token, user_id, model_name=model_name)
@@ -811,6 +811,20 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
+async def send_safe_message(message, text: str, parse_mode: Optional[str] = "Markdown", reply_markup=None):
+    """Send message with markdown, falling back to plain text if markdown entity parsing fails"""
+    try:
+        if hasattr(message, 'reply_text'):
+            return await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        elif hasattr(message, 'edit_text'):
+            return await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"Failed to send message with parse_mode={parse_mode}: {e}. Falling back to plain text.")
+        if hasattr(message, 'reply_text'):
+            return await message.reply_text(text, reply_markup=reply_markup)
+        elif hasattr(message, 'edit_text'):
+            return await message.edit_text(text, reply_markup=reply_markup)
+
 async def _send_pending_diffs(message, user_id: int) -> None:
     """Send pending diff notifications with approve/reject inline buttons"""
     pending_keys = [k for k, v in PENDING_EDITS.items() if v.get("user_id") == user_id and not v.get("notified")]
@@ -834,7 +848,8 @@ async def _send_pending_diffs(message, user_id: int) -> None:
                 InlineKeyboardButton("❌ Reject Changes", callback_data=f"reject_edit:{edit_id}")
             ]
         ]
-        await message.reply_text(
+        await send_safe_message(
+            message,
             msg_text,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
